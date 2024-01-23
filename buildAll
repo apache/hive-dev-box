@@ -29,8 +29,8 @@ if [ "$1" == "push" ]; then
 fi
 
 
-baseName=kgyrtkirk/hive-dev-box
-altName=kgyrtkirk/hive-dev-box
+baseName=apache/hive-dev-box
+altName=apache/hive-dev-box
 if [ "$1" != "" ]; then
 	altName="$1"
 	shift

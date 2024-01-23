@@ -1,4 +1,4 @@
-FROM kgyrtkirk/hive-dev-box:latest
+FROM apache/hive-dev-box:latest
 
 USER root
 

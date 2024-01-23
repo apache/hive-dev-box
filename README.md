@@ -25,7 +25,7 @@ Ability to run some version of hive as a standalone container;
 
 Lets launch a hive with:
 ```
-docker run --rm -d -p 10000:10000 -v hive-dev-box_work:/work kgyrtkirk/hive-dev-box:bazaar
+docker run --rm -d -p 10000:10000 -v hive-dev-box_work:/work apache/hive-dev-box:bazaar
 ```
 the above will initialize the metastore and launch a nodemanger/resourcemanager and hive as separate processes inside the container (in a screen session)
 
