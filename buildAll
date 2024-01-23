@@ -1,0 +1,39 @@
+#!/bin/bash -e
+
+#buildAll push docker-sandbox.infra.cloudera.com/hive/hive-dev-box
+
+
+set -x
+d="`date +%Y%m%d%H%M%S`"
+
+push="echo NOT pushing"
+if [ "$1" == "push" ]; then
+	push="docker push"
+	shift
+fi
+
+
+baseName=kgyrtkirk/hive-dev-box
+altName=kgyrtkirk/hive-dev-box
+if [ "$1" != "" ]; then
+	altName="$1"
+	shift
+fi
+
+function build() {
+	n="$1"
+	shift
+	docker build -t  $baseName:${n} \
+		      -t $baseName:${n}-$d	"$@"
+	docker tag $baseName:${n} $altName:${n}
+	docker tag $baseName:${n} $altName:${n}-$d
+
+	$push $altName:${n}
+	$push $altName:${n}-$d
+}
+
+build latest		-f Dockerfile .
+build executor		-f Dockerfile.executor .
+build executor-1001	-f Dockerfile.executor --build-arg UID=1001 .
+build bazaar		-f Dockerfile.bazaar .
+

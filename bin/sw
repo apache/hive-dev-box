@@ -1,0 +1,276 @@
+#!/bin/bash -e
+
+#[ "$EUID" != 0 ] && sudo $0 "$@" && exit 0
+
+
+SW_DIR=${SW_DIR:-/work/}
+SW_DL_DIR=${SW_DL_DIR:-$SW_DIR/downloads}
+
+mkdir -p $SW_DIR $SW_DL_DIR
+
+apache_mirror='http://xenia.sote.hu/ftp/mirrors/www.apache.org/'
+archive_mirror='https://archive.apache.org/dist/'
+
+err_report() {
+    echo "Error on line $1"
+}
+
+trap 'err_report $LINENO' ERR
+
+function dl() {
+
+	[ -f "$1" ] && echo "already downloaded $1" && return 0
+	f=$1
+	shift
+	while [ "$1" != "" ];do
+		wget -nv -O "$f.tmp" "$1" && mv "$f.tmp" "$f" && return 0
+		shift
+	done
+	echo "unable to download $f"
+	return 1
+}
+
+function activate() {
+	echo "@ activating: $2 for $1"
+	T=/active/$1
+	rm -f "$T"
+	ln -s "$2" "$T"
+
+}
+
+IFS=, read -ra components <<< "$1"
+#components="${1}"
+shift
+
+for component in "${components[@]}";do
+
+cd $SW_DIR
+case "$component" in
+	java)
+		sudo update-java-alternatives --set zulu$1-ca-amd64
+		echo "export JAVA_HOME=/usr/lib/jvm/zulu$1-ca-amd64/" | sudo tee /etc/profile.d/java.sh
+		echo "open a new shell or run: . /etc/profile.d/java.sh"
+	;;
+	hive-dev)
+		HIVE_DIR=${1:-/home/dev/hive/}
+		d=$HIVE_DIR/packaging/target/apache-hive-*-bin/apache-hive-*-bin/
+		[ ! -d $d ] && echo "ERROR: expected a directory at: $d" && exit 1
+		activate hive $d
+	;;
+	tez-dev)
+		sudo apt-get install -y xmlstarlet
+		rm -f /active/tez
+
+		v="`xmlstarlet sel  -N x=http://maven.apache.org/POM/4.0.0 -t -v x:project/x:version /home/dev/tez/pom.xml`"
+		d=/home/dev/tez/tez-dist/target/tez-$v-minimal
+		f=/home/dev/tez/tez-dist/target/tez-$v-minimal.tar.gz
+		[ ! -e $f ] && echo "ERROR: expected a tar.gz: $f" && exit 1
+		[ ! -d $d ] && echo "ERROR: expected a dir: $d" && exit 1
+		conf set tez/tez-site tez.use.cluster.hadoop-libs true
+		cp $f /apps/tez/tez.tar.gz
+		activate tez $d
+	;;
+	hive|hadoop|tez)
+		sw2 $component "$@"
+	;;
+	eclipse)
+		#version=${1:-2020-09}
+		version=${1:-2019-06}
+		state=${2:-R}
+		type=${3:-java}
+		bin_dir=$SW_DIR/eclipse-${version}-${state}-${type}
+		if [ -d "$bin_dir" ];then
+			echo "$bin_dir already installed"
+		else
+			fn=$SW_DL_DIR/eclipse-${type}-${version}.tar.gz
+			#http://mirrors.uniri.hr/eclipse//technology/epp/downloads/release/2019-03/R/eclipse-java-2019-03-R-linux-gtk-x86_64.tar.gz
+			path=eclipse//technology/epp/downloads/release/${version}/${state}/eclipse-${type}-${version}-${state}-linux-gtk-x86_64.tar.gz
+			dl $fn \
+				https://mirror.dkm.cz/${path} \
+				http://eclipse.mirror.garr.it/mirrors/${path}	\
+				http://mirrors.uniri.hr/${path}
+			rm -rf _eclipse_unpack
+			mkdir _eclipse_unpack
+			cd _eclipse_unpack
+			tar xzf $fn
+			wget -nv https://github.com/seeq12/eclipse-import-projects-plugin/raw/master/jar/com.seeq.eclipse.importprojects_1.4.0.jar \
+				-O eclipse/plugins/com.seeq.eclipse.importprojects_1.4.0.jar
+			sed 's/-Xmx1024m/-Xmx3024m/' eclipse/eclipse.ini
+			mv eclipse ${bin_dir}
+			cd ..
+			rmdir _eclipse_unpack
+			#rm $fn
+		fi
+		activate $component $bin_dir
+	;;
+	idea)
+		version=${1:-2021.3.1}
+		bin_dir=$SW_DIR/ideaIC-$version
+		if [ -d "$bin_dir" ];then
+			echo "$bin_dir already installed"
+		else
+			fn=$SW_DL_DIR/ideaIC-${version}.tar.gz
+			dl $fn \
+				https://download.jetbrains.com/idea/ideaIC-${version}.tar.gz
+			tmp=${bin_dir}.tmp
+			rm -rf "$tmp"
+			mkdir "$tmp"
+			tar -C "$tmp" -xzf "$fn"
+			( cd $tmp; ln -s * current)
+			mv "$tmp" "$bin_dir"
+		fi
+		activate $component $bin_dir/current
+	;;
+	mat)
+		version=1.12.0
+		echo "@@ only 1.12.0"
+		bin_dir=$SW_DIR/mat-$version
+		if [ -d "$bin_dir" ];then
+			echo "$bin_dir already installed"
+		else
+			fn=$SW_DL_DIR/ideaIC-${version}.tar.gz
+			dl $fn \
+				https://rhlx01.hs-esslingen.de/pub/Mirrors/eclipse/mat/1.12.0/rcp/MemoryAnalyzer-1.12.0.20210602-linux.gtk.x86_64.zip
+			tmp=${bin_dir}.tmp
+			rm -rf "$tmp"
+			mkdir "$tmp"
+			unzip -d "$tmp" "$fn"
+			#( cd $tmp; ln -s * current)
+			mv "$tmp" "$bin_dir"
+		fi
+		activate $component $bin_dir/mat
+	;;
+	visualvm)
+		version=${1:-1.4.4}
+		v1=${version//./}
+		bin_dir=$SW_DIR/visualvm_$v1
+		if [ -d "$bin_dir" ];then
+			echo "$bin_dir already installed"
+		else
+			fn=$SW_DL_DIR/visualvm-${version}.zip
+			dl $fn \
+				https://github.com/visualvm/visualvm.src/releases/download/${version}/visualvm_${v1}.zip
+			unzip $fn
+		fi
+		activate $component $bin_dir
+	;;
+	maven)
+		version=${1:-3.8.4}
+		bin_dir=$SW_DIR/apache-maven-$version
+		if [ -d "$bin_dir" ];then
+			echo "$bin_dir already installed"
+		else
+			fn=$SW_DL_DIR/apache-maven-${version}.tar.gz
+			dl $fn \
+				${apache_mirror}/maven/maven-3/${version}/binaries/apache-maven-${version}-bin.tar.gz \
+				${archive_mirror}/maven/maven-3/${version}/binaries/apache-maven-${version}-bin.tar.gz
+			tar xzf $fn
+			#rm $fn
+		fi
+		activate $component $bin_dir
+	;;
+	mvnd)
+		version=${1:-0.7.1}
+		bin_dir=$SW_DIR/mvnd-${version}-linux-amd64
+		if [ -d "$bin_dir" ];then
+			echo "$bin_dir already installed"
+		else
+			fn=$SW_DL_DIR/mvnd-${version}.zip
+			dl $fn \
+				https://github.com/mvndaemon/mvnd/releases/download/${version}/mvnd-${version}-linux-amd64.zip
+			unzip $fn
+		fi
+		activate $component $bin_dir
+		echo "PATH+=:/active/mvnd/bin" | sudo tee /etc/profile.d/mvnd.sh
+	;;
+	derby)
+		version=${1:-10.14.2.0}
+		bin_dir=$SW_DIR/db-derby-${version}-bin
+		if [ -d "$bin_dir" ];then
+			echo "$bin_dir already installed"
+		else
+			fn=$SW_DL_DIR/db-derby-${version}-bin.zip
+			dl $fn \
+				https://www-eu.apache.org/dist/db/derby/db-derby-${version}/db-derby-${version}-bin.zip
+			unzip $fn
+			#rm $fn
+		fi
+		activate $component $bin_dir
+	;;
+	protobuf)
+		version=${1:-2.5.0}
+		bin_dir=/work/protobuf-${version}
+		if [ -d "$bin_dir" ];then
+			echo "$bin_dir already installed"
+		else
+			sudo apt-get install -y autoconf automake libtool curl make g++ unzip
+			fn=$SW_DL_DIR/protobuf-${version}.zip
+			dl $fn \
+				https://github.com/google/protobuf/releases/download/v${version}/protobuf-${version}.zip
+			d="$SW_DL_DIR/protobuf-${version}.tmp"
+			rm -rf $d
+			mkdir $d
+			cd $d
+			unzip $fn
+			cd protobuf-${version}
+			./autogen.sh
+			./configure --prefix=$bin_dir
+			make
+			make install
+		fi
+		activate $component $bin_dir
+	;;
+	thrift)
+		V=${1:-0.9.3}
+		bin_dir=/work/thrift-${V}
+		sudo apt-get install -y autoconf make automake flex bison gcc  g++ libtool pkg-config #checkinstall
+		if [ -d "$bin_dir" ];then
+			echo "$bin_dir already installed"
+		else
+			echo " * installing thrift compiler $V"
+			sudo apt-get install -y autoconf make automake flex bison gcc  g++ libtool pkg-config #checkinstall #python3-setuptools
+			build_dir="$SW_DL_DIR/build_thrift_$V"
+			rm -rf "$build_dir"
+			mkdir -p "$build_dir"
+			cd "$build_dir"
+			wget -nv  https://github.com/apache/thrift/archive/${V}.tar.gz
+			tar xzf ${V}.tar.gz && rm ${V}.tar.gz
+			cd thrift-${V}
+			./bootstrap.sh
+			./configure --prefix=$bin_dir --without-py3 --without-python  --without-qt5 --without-java --without-erlang --without-nodejs --without-nodets --without-lua --without-python --without-perl --without-php --without-php_extension --without-dart --without-ruby --without-haskell --without-go --without-swift --without-rs --without-cl --without-haxe --without-netstd --without-d
+			make
+			ln -s compiler/cpp/ bin
+			ln -s contrib share
+			mv "$build_dir/thrift-${V}" "$bin_dir"
+		fi
+		activate $component $bin_dir
+	;;
+	kubebuilder)
+		V=1.0.8
+		arch=amd64
+		bin_dir=/work/kubebuilder_${V}_linux_${arch}
+		if [ -d "$bin_dir" ];then
+			echo "$bin_dir already installed"
+		else
+			fn=$SW_DL_DIR/kubebuilder-${version}.tar.gz
+			dl $fn \
+				"https://github.com/kubernetes-sigs/kubebuilder/releases/download/v${V}/kubebuilder_${V}_linux_${arch}.tar.gz"
+			tar xzf $fn
+		fi
+		activate $component $bin_dir
+	;;
+	*)
+		cat << EOF
+Switches between installed components
+	$0 <hadoop|hive|hive-dev|tez> [version]
+	example:
+		$0 hive			# activates some recent hive
+		$0 hive 3.1.1
+		$0 hadoop
+		$0 hive-dev		# switches to use /hive-dev's binary package
+EOF
+		exit 1
+	;;
+esac
+
+done

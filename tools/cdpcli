@@ -1,0 +1,21 @@
+#!/bin/bash
+set -e
+
+curl -s https://packagecloud.io/install/repositories/segment/aws-okta/script.deb.sh | sudo bash
+sed -i 's/buster/stretch/' /etc/apt/sources.list.d/segment_aws-okta.list
+sudo apt-get update
+sudo apt-get install -y aws-okta
+
+sudo apt-get install -y virtualenv python3-pip
+
+pip3 install cdpcli
+
+cd /tmp/
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+
+rm awscliv2.zip
+rm -rf aws
+
+/tools/build_cleanup

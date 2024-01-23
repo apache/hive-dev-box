@@ -1,0 +1,235 @@
+#!/bin/bash -e
+
+type=${1:-derby}
+DOCKER_NETWORK=${DOCKER_NETWORK:-hive-dev-box-net}
+[ "$#" -gt 0 ] && shift
+force=0
+[ "$1" == "-f" ] && shift && force=1
+
+# FIXME enable hive.metastore.schema.verification
+
+echo "@ initializing: $type"
+
+DOCKER="sudo -E docker"
+RUN_OPTS+=" --network $DOCKER_NETWORK"
+function isContainerRunning() {
+    [ "`$DOCKER ps -q -f name=$1`" != "" ]
+}
+
+if [ "$DBNAME" == "" ];then
+	dbName="ms_`hostname|tr '-' '_'|tr 'A-Z' 'a-z'`"
+else
+	dbName=$DBNAME
+fi
+
+echo "metastore database name: $dbName"
+
+function installFile() {
+    D="$1"
+    URL="$2"
+    mkdir -p /apps/lib
+    cd /apps/lib
+    N="`basename "$URL"`"
+    if [ ! -f "$N" ];then
+        echo "@ installing $N"
+        wget -O "$N.tmp" -nv "$URL"
+        mv "$N.tmp" "$N"
+    fi
+
+}
+function startup_container() {
+    local containerName=$1
+    shift
+    if isContainerRunning $containerName;then
+        if [ $force == "1" ];then
+            $DOCKER rm -f "$containerName"
+        fi
+    fi
+
+    if isContainerRunning $containerName;then
+        echo "@ $containerName is running..."
+    else
+        echo "@ starting $containerName..."
+        $DOCKER run --name $containerName $*
+    fi
+}
+
+function wait_for_port() {
+    local containerName=$1
+    local port=$2
+    echo "Waiting for port $port in $containerName to be available..."
+    wait-for-port --timeout=300 --host=$containerName $port || status=$?
+    if [ $status > 0 ]; then
+      $DOCKER logs $containerName
+      exit $status
+    fi
+}
+
+case $type in
+    rebuild)
+        n="`git status -s | wc -l `"
+        if [ "$n" -ne 0 ];then
+            git status -s
+            echo ">> ok to purge and rebuild? "
+            read
+            if [ "$REPLY" != "y" ];then
+                echo " ...exiting"
+                exit 1
+            fi
+        fi
+        /usr/local/hive-toolbox/scripts/xl_hive_reinit `git config --get extra.ideProjects`
+        exit 0
+    ;;
+    derby)
+        D=/data/hive/metastore_db
+        rm -rf $D
+        conf del hive/hive-site javax.jdo.option.ConnectionDriverName
+        conf set hive/hive-site javax.jdo.option.ConnectionURL "jdbc:derby:;databaseName=/data/hive/metastore_db;create=true"
+        conf del hive/hive-site javax.jdo.option.ConnectionUserName
+        conf del hive/hive-site javax.jdo.option.ConnectionPassword
+	    cp /active/hive/lib/derby-*.jar /apps/lib/
+    ;;
+    mysql)
+        containerName=dev_mysql
+        RUN_OPTS+=" -e MYSQL_ROOT_PASSWORD=mypassword"
+        RUN_OPTS+=" --restart always -d"
+        RUN_OPTS+=" mariadb:10.8.3"
+
+        startup_container $containerName $RUN_OPTS
+
+        cat > ~/.my.cnf << EOF
+            [client]
+            user=hive
+            password=mypassword
+            database=$dbName
+            host=$containerName
+EOF
+        wait_for_port $containerName 3306
+        id
+echo $dbName
+        mysql -uroot mysql -f << EOF
+            drop database if exists $dbName;
+            create database $dbName;
+            CREATE USER IF NOT EXISTS 'hive'@'%' IDENTIFIED BY 'mypassword';
+            GRANT ALL PRIVILEGES ON $dbName.* TO 'hive'@'%';
+            FLUSH PRIVILEGES;
+EOF
+        mkdir -p /apps/lib
+        cd /apps/lib
+        [ ! -f mysql-connector-java-8.0.17.jar ] && wget -nv https://repo1.maven.org/maven2/mysql/mysql-connector-java/8.0.17/mysql-connector-java-8.0.17.jar
+
+        conf set hive/hive-site javax.jdo.option.ConnectionDriverName com.mysql.jdbc.Driver
+        conf set hive/hive-site javax.jdo.option.ConnectionURL "jdbc:mysql://$containerName:3306/$dbName"
+        conf set hive/hive-site javax.jdo.option.ConnectionUserName hive
+        conf set hive/hive-site javax.jdo.option.ConnectionPassword mypassword
+    ;;
+    postgres)
+        containerName=dev_postgres
+        RUN_OPTS+=" -e POSTGRES_PASSWORD=mypassword"
+        RUN_OPTS+=" --restart always -d"
+        RUN_OPTS+=" postgres:buster"
+        startup_container $containerName $RUN_OPTS
+
+        wait_for_port $containerName 5432
+
+        # FIXME: PGHOST/PGUSER/PGDATABASE set in _conf
+        export PGHOST=$containerName
+        export PGUSER=hive
+        export PGDATABASE=$dbName
+        #export PGDATABASE=$dbName
+        echo $containerName:5432:$dbName:hive:mypassword > ~/.pgpass
+        echo $containerName:5432:postgres:postgres:mypassword >> ~/.pgpass
+        chmod 600 ~/.pgpass
+        psql -U postgres postgres -c "CREATE ROLE hive LOGIN PASSWORD 'mypassword'" || echo ok
+        
+        psql -U postgres postgres -c "drop database if exists $dbName"
+        psql -U postgres postgres -c "create database $dbName owner hive"
+
+        installFile /apps/lib https://repo1.maven.org/maven2/org/postgresql/postgresql/42.2.9/postgresql-42.2.9.jar
+
+        conf set hive/hive-site javax.jdo.option.ConnectionDriverName org.postgresql.Driver
+        conf set hive/hive-site javax.jdo.option.ConnectionURL "jdbc:postgresql://$containerName/$dbName"
+        conf set hive/hive-site javax.jdo.option.ConnectionUserName hive
+        conf set hive/hive-site javax.jdo.option.ConnectionPassword mypassword
+    ;;
+    oracle)
+        containerName=dev_oracle
+        # FIXME: consider relaxing restart always
+        RUN_OPTS+=" --restart always -d"
+        RUN_OPTS+=" quay.io/maksymbilenko/oracle-12c"
+        startup_container $containerName $RUN_OPTS
+
+        wait_for_port $containerName 1521
+        wait_for_port $containerName 8080
+
+        echo "$DOCKER exec -it $containerName /bin/bash -ic 'sqlplus -L \"system/oracle\"' "'$@' | sudo dd of=/bin/sqlplus_sys
+        # FIXME it would be better to detect wether stdin is a file or not...
+	    echo "$DOCKER exec -i $containerName /bin/bash -ic 'sqlplus -S -L \"system/oracle\"' "'$@' | sudo dd of=/bin/sqlplus_sys0
+    	echo "$DOCKER exec -it $containerName /bin/bash -ic 'sqlplus -L \"$dbName/mypassword\"' "'$@' | sudo dd of=/bin/sqlplus
+    	sudo chmod +x /bin/sqlplus{,_sys*}
+
+        sqlplus_sys0 << EOF
+    drop user $dbName cascade;
+
+	CREATE USER $dbName IDENTIFIED BY mypassword;
+	GRANT SELECT_CATALOG_ROLE TO $dbName;
+	GRANT CONNECT, RESOURCE TO $dbName;
+	GRANT UNLIMITED TABLESPACE TO $dbName;
+	QUIT;
+EOF
+        conf set hive/hive-site javax.jdo.option.ConnectionDriverName oracle.jdbc.OracleDriver
+        conf set hive/hive-site javax.jdo.option.ConnectionURL "jdbc:oracle:thin:@//$containerName/xe"
+        conf set hive/hive-site javax.jdo.option.ConnectionUserName $dbName
+        conf set hive/hive-site javax.jdo.option.ConnectionPassword mypassword
+
+        #$DOCKER cp $containerName:/u01/app/oracle/product/11.2.0/xe/jdbc/lib/ojdbc6.jar /apps/lib
+        $DOCKER cp $containerName:/u01/app/oracle-product/12.2.0/SE/dmu/jlib/ojdbc6.jar /apps/lib
+    ;;
+    mssql)
+        containerName=dev_mssql
+        # FIXME: consider relaxing restart always
+        RUN_OPTS+=" --restart always -d"
+        RUN_OPTS+=" -e ACCEPT_EULA=Y"
+        RUN_OPTS+=" -e SA_PASSWORD=passwordX@ASD"
+        RUN_OPTS+=" mcr.microsoft.com/mssql/server:2019-latest"
+        startup_container $containerName $RUN_OPTS
+
+        echo "$DOCKER exec -i $containerName /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'passwordX@ASD' "'$@' | sudo dd of=/bin/sqlcmd_SA0
+        echo "$DOCKER exec -it $containerName /opt/mssql-tools/bin/sqlcmd -S localhost -U SA -P 'passwordX@ASD' "'$@' | sudo dd of=/bin/sqlcmd_SA
+        echo "$DOCKER exec -it $containerName /opt/mssql-tools/bin/sqlcmd -S localhost -d $dbName -U hiveuser -P 'mypassword@ASD' "'$@' | sudo dd of=/bin/sqlcmd
+        sudo chmod +x /bin/sqlcmd{_SA,_SA0,}
+
+        wait_for_port $containerName 1433
+
+        installFile /apps/lib https://repo1.maven.org/maven2/com/microsoft/sqlserver/mssql-jdbc/7.4.1.jre8/mssql-jdbc-7.4.1.jre8.jar
+	sleep 3
+        #make sure hiveuser exists...
+        sqlcmd_SA0 << EOF
+CREATE LOGIN hiveuser with password='mypassword@ASD';
+CREATE USER hiveuser for login hiveuser;
+GO
+EOF
+
+        sqlcmd_SA0 << EOF
+DROP DATABASE IF EXISTS $dbName;
+CREATE DATABASE $dbName;
+GO
+ALTER AUTHORIZATION ON DATABASE::$dbName TO hiveuser;
+GO
+EOF
+
+        conf set hive/hive-site javax.jdo.option.ConnectionDriverName com.microsoft.sqlserver.jdbc.SQLServerDriver
+        conf set hive/hive-site javax.jdo.option.ConnectionURL "jdbc:sqlserver://$containerName:1433;DatabaseName=$dbName"
+        conf set hive/hive-site javax.jdo.option.ConnectionUserName hiveuser
+        conf set hive/hive-site javax.jdo.option.ConnectionPassword mypassword@ASD
+
+    ;;
+    *)
+        banner not impl
+        exit 1
+esac
+
+schematool -verbose -dbType $type -initSchema
+schematool -verbose -dbType hive -initSchema -metaDbType $type
+
+banner ok

@@ -1,0 +1,10 @@
+#!/bin/bash -e
+
+nice srcs hive
+cd hive
+n=`hostname`
+git branch $n apache/master
+git checkout $n
+git push kgyrtkirk -u HEAD
+nice -n 19 rebuild
+banner ok

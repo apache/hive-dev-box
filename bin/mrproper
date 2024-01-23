@@ -1,0 +1,14 @@
+#!/bin/bash -e
+
+if git status --porcelain=2|grep .;then
+    echo "> worktree is not clean; continue?"
+    read
+    if [ "$REPLY" != "y" ]; then
+        echo "interrupted.."
+        exit 1
+    fi
+fi
+
+git clean -dfx
+rm -rf ~/.m2/repository/
+rm ~/ws_*/.metadata/.plugins/org.eclipse.jdt.core/*.index
